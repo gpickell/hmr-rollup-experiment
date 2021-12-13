@@ -1,0 +1,4 @@
+dist
+experiments/dist
+node_modules
+experiments/node_modules
