@@ -6,6 +6,7 @@ import path from "path";
 import resolve from "./utils/resolve";
 import sass from "sass";
 import fs, { GlobMatch } from "./utils/fs";
+import { FileOptimizers } from "./optimize";
 
 const hmrIndex = resolve("./hmr/index");
 const commentx = /^(\s*)<!--\s*([^\s]+)\s*(.*?)\s*-->\s*$/;
@@ -45,86 +46,6 @@ function slashify(fn: string) {
 function relative(from: string, to: string) {
     const rel = path.relative(path.dirname(from), to);
     return slashify(rel);
-}
-
-export interface FileOptimizer {
-    (file: string, content: string | Buffer): Promise<string | Buffer> | string | Buffer;
-}
-
-const converters = {
-    asset(data: Data) {
-        if (typeof data === "string") {
-            return data;
-        }
-
-        return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-    },
-
-    base64(data: Data) {
-        if (typeof data === "string") {
-            return Buffer.from(data, "utf-8").toString("base64");
-        }
-
-        const result = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
-        return result.toString("base64");
-    },
-
-    source(data: Data) {
-        if (typeof data === "string") {
-            return data;
-        }
-
-        const result = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
-        return result.toString("utf-8");
-    }
-};
-
-type Data = string | ArrayBufferView;
-type Converters = typeof converters;
-
-export class FileOptimizers extends Map<string, FileOptimizer[]> {
-    add(type: string, fh: FileOptimizer) {
-        let list = this.get(type);
-        if (list === undefined) {
-            this.set(type, list = []);
-        }
-
-        list.push(fh);
-    }
-
-    async process<K extends keyof Converters>(fn: string, content: Data, result: K) {
-        const type = path.extname(fn);
-        const list = this.get(type);
-        if (list !== undefined) {
-            for (const fh of list) {
-                let data: string | Buffer;
-                if (ArrayBuffer.isView(content)) {
-                    data = Buffer.from(content.buffer, content.byteOffset, content.byteLength);
-                } else {
-                    data = content;
-                }
-
-                content = await fh(fn, data);
-            }
-        }
-
-        return converters[result](content) as ReturnType<Converters[K]>;
-    }
-
-    static create(plugins: Plugin[]) {
-        const result = new this();
-        for (const { api } of plugins) {
-            if (api instanceof this) {
-                for (const [type, handlers] of api) {
-                    for (const handler of handlers) {
-                        result.add(type, handler);
-                    }
-                }
-            }
-        }
-
-        return result;
-    }
 }
 
 export interface HtmlProcessor {
@@ -505,34 +426,6 @@ namespace html {
                 return code.join("");
             }
         };
-    }
-
-    export function optimize(): Plugin {
-        let optimizers: FileOptimizers;
-        return {
-            name: "interop-html-optimize",
-
-            buildStart({ plugins }) {
-                optimizers = FileOptimizers.create(plugins);
-            },
-
-            async generateBundle(_, bundle) {
-                for (const [fn, asset] of Object.entries(bundle)) {
-                    const type = path.extname(fn);
-                    if (asset.type === "asset") {
-                        if (optimizers.has(type)) {
-                            asset.source = await optimizers.process(fn, asset.source, "asset");
-                        }
-                    }
-
-                    if (asset.type === "chunk") {
-                        if (optimizers.has(type)) {
-                            asset.code = await optimizers.process(fn, asset.code, "source");
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 

@@ -5,7 +5,9 @@ import bundle from "dist/bundle";
 import compile from "dist/compile";
 import hoist from "dist/hoist";
 import html from "dist/html";
+import optimize from "dist/optimize";
 import tools from "dist/tools";
+
 import commonjs from "@rollup/plugin-commonjs";
 import resolve from "@rollup/plugin-node-resolve";
 
@@ -62,6 +64,9 @@ export default defineConfig({
 
         hoist.externals({ hintMask: src }),
         hoist.globals({ hintMask: src }),
+
+        // optimize(),
+        optimize.htmlMinifier(),
     ],
     watch: {
         include: [

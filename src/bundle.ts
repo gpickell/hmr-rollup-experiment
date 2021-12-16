@@ -4,7 +4,6 @@ import fs, { GlobMatch } from "./utils/fs";
 import path from "path";
 import resolve from "./utils/resolve";
 import NameSpace from "./utils/NameSpace";
-import switches from "./utils/switches";
 
 const wordx = /[A-Za-z\-]+/;
 const slashx = /[\\/]+/g;
@@ -83,8 +82,32 @@ function bundle(): Plugin {
 }
 
 namespace bundle {
-    interface ClassifyHandlerList extends Record<string, ClassifyHandler> {}
-    class ClassifyHandlerList {}
+    class ClassifyHandlerList extends Map<string, ClassifyHandler> {
+        static create(plugins: Plugin[]) {
+            const result = new this();
+            for (const { api } of plugins) {
+                if (api instanceof this) {
+                    for (const [name, fn] of api) {
+                        result.set(name, fn);
+                    }
+                }
+            }
+
+            return result;
+        }
+    }
+
+    class HMR {
+        static detect(plugins: Plugin[]) {
+            for (const { api } of plugins) {
+                if (api instanceof this) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
 
     export type ClassifyResult = string | string[] | Record<string, string | string[]> | undefined | null | boolean;
 
@@ -97,10 +120,11 @@ namespace bundle {
         return {
             name: "interop-bundle-entry",
 
-            async buildStart() {
+            async buildStart({ plugins }) {
                 ns.clear();
 
-                const { id } = ns.addEntry(name, targets);
+                const hmr = HMR.detect(plugins);
+                const { id } = ns.addEntry(name, targets, hmr);
                 this.emitFile({ type: "chunk", name, id });
             },
 
@@ -143,24 +167,21 @@ namespace bundle {
                 ns.clear();
 
                 let auto: ClassifyHandler | undefined = (name, id) => ({ [name]: id });
-                const handlers: Record<string, ClassifyHandler> = Object.create(null);
-                for (const { api } of plugins) {
-                    if (api instanceof ClassifyHandlerList) {
-                        auto = undefined;
-                        Object.assign(handlers, api);
-                    }
+                const handlers = ClassifyHandlerList.create(plugins);
+                if (handlers.size > 0) {
+                    auto = undefined;
                 }
 
                 const results: Promise<Record<string, string | string[]>>[] = [];
                 for (const fn of await fs.find(dir, filter)) {
                     const key = path.basename(fn, path.extname(fn));
                     const fp = path.resolve(cwd, prefix, fn);
-                    const handler = auto ?? handlers[key];
+                    const handler = auto ?? handlers.get(key);
                     if (handler !== undefined && fp.startsWith(cwd)) {
                         const id = path.relative(cwd, fp).replace(slashx, "/");
                         const resolver = async () => {
                             const name = path.basename(path.dirname(id));
-                            const result = await handlers[key](name, id);
+                            const result = await handler(name, id);
                             if (typeof result === "string" || Array.isArray(result)) {
                                 return { [name]: result };
                             }
@@ -180,11 +201,12 @@ namespace bundle {
                     }
                 }
 
+                const hmr = HMR.detect(plugins);
                 for (const result of await Promise.all(results)) {
                     for (const name in result) {
                         const targets = result[name];
                         if (typeof targets === "string" || Array.isArray(targets)) {
-                            const { id } = ns.addEntry(name, targets);
+                            const { id } = ns.addEntry(name, targets, hmr);
                             this.emitFile({ type: "chunk", name, id });
                         }
                     }
@@ -207,7 +229,7 @@ namespace bundle {
         }
 
         const api = new ClassifyHandlerList();
-        api[name] = handler;
+        api.set(name, handler);
 
         return {
             name: "interop-bundle-classify",
@@ -216,14 +238,13 @@ namespace bundle {
     }
 
     export function hmr(...mask: (GlobMatch | string | string[])[]): Plugin {
-        switches.hmrEnabled = true;
-
         let luid = 0;
         const filter = fs.glob(...mask);
         const ns = new NameSpace();
         const state = new Map<string, number>();
         return {
             name: "interop-bundle-hmr",
+            api: new HMR(),
 
             buildStart() {
                 luid = (new Date()).valueOf();

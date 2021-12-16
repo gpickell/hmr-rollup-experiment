@@ -61,6 +61,7 @@ const inputs = [
     "hoist",
     "html",
     "tools",
+    "optimize",
 
     "hook/index",
     "hmr/index",

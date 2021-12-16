@@ -1,6 +1,5 @@
 import type { PluginContext, ResolveIdResult } from "rollup";
 import resolve from "./resolve";
-import switches from "./switches";
 
 import fs from "../utils/fs";
 import path from "path";
@@ -134,10 +133,12 @@ class AliasModule extends Module {
 class EntryModule extends Module {
     hint: string;
     targets: string | string[];
+    track: boolean;
 
-    constructor(ns: NameSpace, hint: string, targets: string | string[]) {
+    constructor(ns: NameSpace, hint: string, targets: string | string[], track: boolean) {
         super();
         this.hint = hint + ".json";
+        this.track = track;
 
         if (Array.isArray(targets)) {
             this.targets = targets.map(x => {
@@ -163,7 +164,7 @@ class EntryModule extends Module {
             `track(import.meta.url, ${expand(this.hint)});\n`,
         ];
 
-        if (!switches.hmrEnabled) {
+        if (!this.track) {
             hmr.length = 0;
         }
 
@@ -338,8 +339,8 @@ class NameSpace extends Map<string, Module> {
         return this.register(["global", name, hint], () => new GlobalModule(name, hint));
     }
 
-    addEntry(name: string, targets: string | string[]) {
-        return this.register(["entry", nextId++], () => new EntryModule(this, name, targets));
+    addEntry(name: string, targets: string | string[], track: boolean) {
+        return this.register(["entry", nextId++], () => new EntryModule(this, name, targets, track));
     }
 
     addGlob(dir: string, pattern: string) {
