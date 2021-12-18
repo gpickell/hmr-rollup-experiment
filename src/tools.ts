@@ -156,22 +156,47 @@ namespace tools {
         };
     }
 
-    export function copy(root: string, ...patterns: (GlobMatch | string | string[])[]): Plugin {
+    function findBase(files: string[]) {
+        files.sort();
+        
+        const [head, ...rest] = files;
+        if (head === undefined) {
+            return ".";
+        }
+
+        const tail = rest.pop();
+        if (tail === undefined) {
+            return path.dirname(head);
+        }
+
+        const j = Math.min(head.length, tail.length);
+        for (let i = 0; i < j && head[i] === tail[i]; i++) {}
+
+        const prefix = head.substring(0, j);
+        const [base] = prefix.match(/^(.*[\\/])?/)!;
+        return base;
+    }
+
+    export function copy(root: string, dest = ".", ...patterns: (GlobMatch | string | string[])[]): Plugin {
         if (patterns.length < 1) {
             patterns = ["**/*"];
         }
+
+        root = root.replace(/^!/, "node_modules/");
+        root = path.resolve(process.cwd(), root);
 
         const filter = fs.glob(...patterns);
         return {
             name: "interop-copy",
 
             async generateBundle() {
-                const dir = path.resolve(cwd, root);
-                const files = await fs.find(dir, filter);
-                for (const [file, data] of await fs.load(dir, files)) {
+                const files = await fs.find(root, filter);
+                const base = findBase(files);
+                for (const [file, data] of await fs.load(root, files)) {
+                    const fn = file.substring(base.length);
                     this.emitFile({
                         type: "asset",
-                        fileName: file,
+                        fileName: path.join(dest, fn),
                         source: data,
                     });
                 }
@@ -179,15 +204,48 @@ namespace tools {
         };
     }
 
-    export function observe(fn: () => Promise<void> | void): Plugin {
-        let waiter: Promise<void> | void;
+    export function xcopy(root: string, dest = ".", ...patterns: (GlobMatch | string | string[])[]): Plugin {
+        if (patterns.length < 1) {
+            patterns = ["**/*"];
+        }
+
+        root = root.replace(/^!/, "node_modules/");
+        root = path.resolve(process.cwd(), root);
+
+        const copy = async (dest: string, base: string, fn: string) => {
+            const to = path.resolve(dest, fn.substring(base.length));
+            if (await fs.exists(to) !== "file") {
+                const dir = path.dirname(to);
+                await fs.mkdir(dir, { recursive: true });
+
+                const from = path.resolve(root, fn);
+                await fs.copyFile(from, to);
+            }
+        };
+
+        const filter = fs.glob(...patterns);
+        return {
+            name: "interop-xcopy",
+
+            async writeBundle({ dir }) {                
+                const files = await fs.find(root, filter);
+                const base = findBase(files);
+                const to = path.resolve(process.cwd(), dir ?? "dist", dest);
+                const copies = files.map(x => copy(to, base, x));
+                await Promise.all(copies);
+            }
+        };
+    }
+
+    export function observe(fn: () => any): Plugin {
+        let waiter: Promise<void> | undefined;
         return () => {
             return {
                 name: "interop-observe",
     
                 async buildStart() {
                     if (waiter === undefined) {
-                        waiter = fn();
+                        waiter = (async () => { await fn() })();
                     }
     
                     await waiter;
@@ -229,69 +287,6 @@ namespace tools {
         };
     }
 
-    const tasks: Promise<void>[] = [];
-
-    async function fetch(url: string) {
-        url;
-        return "";
-    }
-
-    async function relink(src: string, dst: string) {
-        const x = await fs.stat(src, { bigint: true }).catch(() => undefined);
-        const y = await fs.stat(dst, { bigint: true }).catch(() => undefined);
-        if (x?.mtimeNs !== y?.mtimeNs || x?.size !== y?.size) {
-            if (y !== undefined) {
-                await fs.unlink(dst);
-            }
-
-            await fs.link(src, dst);
-        }
-    }
-
-    export async function dlx(url: string, to: string, ...patterns: (GlobMatch | string | string[])[]) {
-        to = path.resolve(cwd, to);
-
-        const filter = fs.glob(...patterns);
-        const promises: any[] = [];
-        return () => {
-            return {
-                name: "interop-dlx",
-    
-                async buildStart() {
-                    if (promises.length < 1) {
-                        const deps = [...tasks];
-                        tasks.length = 0;
-    
-                        const execute = async () => {
-                            for (const dep of deps) {
-                                await dep;
-                            }
-
-                            const dir = await fetch(url);
-                            const names = await fs.find(dir, filter);
-                            await fs.mkdir(to, { recursive: true });
-                            
-                            const promises: any[] = []
-                            for (const name of names) {
-                                const src = path.resolve(dir, name);
-                                const dst = path.resolve(to, name);
-                                promises.push(relink(src, dst));
-                            }
-
-                            await Promise.all(promises);
-                        };
-    
-                        const promise = execute();
-                        promises.push(promise);
-                        tasks.push(promise.catch(() => undefined));
-                    }
-    
-                    await Promise.all(promises);
-                }
-            };
-        };
-    }
-
     export function glob(): Plugin {
         const ns = new NameSpace();
         return {
@@ -301,9 +296,9 @@ namespace tools {
                 ns.clear();
             },
     
-            async resolveId(id, importer) {
+            async resolveId(id, importer, opts) {
                 if (ns.contains(id)) {
-                    return id;
+                    return ns.resolve(this, id, opts)
                 }
 
                 if (id[0] === "\0" || importer?.[0] === "\0") {
@@ -366,7 +361,7 @@ namespace tools {
         const ns = new NameSpace();
         const { transform } = inject({ modules: globals() });
         return {
-            name: "interop-alias",
+            name: "interop-provide",
 
             resolveId(id, _, opts) {
                 if (ns.contains(id)) {

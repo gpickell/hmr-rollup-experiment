@@ -55,13 +55,15 @@ function autoIndex() {
 }
 
 const inputs = [
-    "builder",
+    "defaults",
     "bundle",
     "compile",
     "hoist",
     "html",
     "tools",
     "optimize",
+    "resolve",
+    "web",
 
     "hook/index",
     "hmr/index",

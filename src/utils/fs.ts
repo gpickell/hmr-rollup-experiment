@@ -231,12 +231,26 @@ export async function find(path: string, ...globs: (GlobMatch | string | string[
     return results;
 }
 
+async function exists(path: string) {
+    const stat = await __fs.stat(path).catch(() => undefined);
+    if (stat?.isDirectory()) {
+        return "dir";
+    }
+
+    if (stat?.isFile()) {
+        return "file";
+    }
+
+    return false;
+}
+
 const methods = {
     peek,
     load,
     find,
     glob,
     scan,
+    exists
 };
 
 const fs = Object.assign(Object.create(__fs) as typeof __fs, methods);

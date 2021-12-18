@@ -1,7 +1,7 @@
 import type { LoadResult, Plugin } from "rollup";
 import type { JscConfig, JscTarget } from "@swc/core";
 
-import builder from "./builder";
+import { extensions } from "./defaults";
 import fs from "./utils/fs";
 import path from "path";
 
@@ -98,7 +98,7 @@ namespace compile {
 
     export function swc(preset = def, js = false): Plugin {
         const { cache } = preset;
-        const exts = new Set(builder.extensions);
+        const exts = new Set(extensions);
         return {
             name: "interop-compiler-swc",
 

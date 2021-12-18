@@ -1,6 +1,6 @@
 import path from "path";
 
-function urlConvert(href: string, baseUrl: URL | string = import.meta.url) {
+function urlConvert(href: string | URL, baseUrl: URL | string = import.meta.url) {
     const url = new URL(href, baseUrl);
     if (url.protocol !== "file:") {
         throw new TypeError("resolve() was given a non-file url.")

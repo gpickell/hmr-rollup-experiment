@@ -1,12 +1,10 @@
 import { defineConfig } from "rollup";
 
-import builder from "dist/builder";
 import bundle from "dist/bundle";
 import compile from "dist/compile";
 import hoist from "dist/hoist";
+import resolve from "dist/resolve";
 import tools from "dist/tools";
-import commonjs from "@rollup/plugin-commonjs";
-import resolve from "@rollup/plugin-node-resolve";
 
 const src = [
     "experiments/**",
@@ -36,8 +34,8 @@ export default defineConfig({
         tools.bind(),
 
         compile.swc(),
-        commonjs(builder.cjs),
-        resolve(builder.resolve),
+        resolve.cjs(),
+        resolve.node(),
 
         hoist.externals({ hintMask: src }),
         hoist.globals({ hintMask: src }),

@@ -1,10 +1,12 @@
 import type { Plugin } from "rollup";
-import builder from "./builder";
-import NameSpace from "./utils/NameSpace";
 
 import inject from "@rollup/plugin-inject";
 import path from "path";
 import fs, { GlobMatch } from "./utils/fs";
+
+import { externals as _externals } from "./defaults";
+import { globals as _globals } from "./defaults";
+import NameSpace from "./utils/NameSpace";
 
 const cwd = path.normalize(process.cwd() + "/");
 const slashx = /[\\/]+/g;
@@ -39,14 +41,14 @@ namespace hoist {
         [Symbol.iterator]?(): Iterator<string>;
     };
 
-    export function externals(options: ExternalsOptions = builder.externals): Plugin {
+    export function externals(options: ExternalsOptions = _externals): Plugin {
         const ns = new NameSpace();
         const externals = () => {
             if (isIterable(options)) {
                 return options;
             }
 
-            return options.externals ?? builder.externals;
+            return options.externals ?? _externals;
         };
         
         const hintMask = () => {
@@ -83,7 +85,7 @@ namespace hoist {
         [Symbol.iterator]?(): Iterator<string>;
     }
 
-    export function globals(options: GlobalsOptions = builder.globals): Plugin {
+    export function globals(options: GlobalsOptions = _globals): Plugin {
         const prefix = NameSpace.alloc();
         const globals = () => {
             const result: Record<string, string> = {};
@@ -95,7 +97,7 @@ namespace hoist {
                 return result;
             }
 
-            for (const id of options.globals ?? builder.globals) {
+            for (const id of options.globals ?? _globals) {
                 result[id] = `${prefix}${id}`;
             }
 

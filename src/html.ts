@@ -1,7 +1,7 @@
 import type HMR from "./hmr/HotModuleContext";
 import type { OutputChunk, Plugin } from "rollup";
 
-import builder from "./builder";
+import { mimeTypes } from "./defaults";
 import path from "path";
 import resolve from "./utils/resolve";
 import sass from "sass";
@@ -103,7 +103,7 @@ export class HtmlProcessors extends Map<string, HtmlProcessor> {
     
                     const data = content.toString("base64");
                     const ext = path.extname(href);
-                    const mimeType = builder.mimeTypes[ext as keyof typeof builder.mimeTypes];
+                    const mimeType = mimeTypes[ext as keyof typeof mimeTypes];
                     const url = `data:${mimeType};base64,${data}`;
                     this.emit(`${prefix}${url}${suffix}`);
                 }
@@ -328,8 +328,8 @@ namespace html {
                     return undefined;
                 }
 
-                const ext = path.extname(id) as keyof typeof builder.mimeTypes;
-                const mimeType = builder.mimeTypes[ext];
+                const ext = path.extname(id) as keyof typeof mimeTypes;
+                const mimeType = mimeTypes[ext];
                 if (mimeType) {
                     const image = await fs.readFile(id);
                     const data = await optimizers.process(id, image, "base64");
