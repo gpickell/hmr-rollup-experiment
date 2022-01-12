@@ -1,7 +1,7 @@
 import type { Plugin } from "rollup";
-import type { Readable } from "stream";
+import type { Readable, Writable } from "stream";
 
-import fs, { GlobMatch } from "./utils/fs";
+import fs from "./utils/fs";
 import { createReadStream, createWriteStream } from "fs";
 import crypto from "crypto";
 import http from "http";
@@ -14,6 +14,18 @@ import yauzl from "yauzl";
 
 let running = false;
 const queue: ((next: () => void) => void)[] = [];
+
+async function mkdir(fn: string) {
+    await fs.mkdir(fn, { recursive: true });
+}
+
+async function mkdirParent(fn: string) {
+    await fs.mkdir(path.dirname(fn), { recursive: true });
+}
+
+async function clean(fn: string) {
+    return fs.rm(fn, { recursive: true  }).catch(() => {});    
+}
 
 async function start() {
     for (const fn of queue) {
@@ -41,6 +53,8 @@ function enqueue(fn: () => Promise<void>) {
 async function get(url: string | URL) {
     url = new URL(url);
     url.hash = "";
+
+    console.log("web-fetch: url =", url.toString());
 
     if (url.protocol === "file:") {
         return new Promise<Readable>((resolve, reject) => {
@@ -84,67 +98,68 @@ async function get(url: string | URL) {
     throw new Error(`Cannot fetch ${url}, protocol must be one of http, https, or file.`);
 }
 
-async function store(fn: string, stream: Readable) {
-    await fs.mkdir(path.dirname(fn), { recursive: true }).catch(() => {});
-
+function pipeAsync(from: Readable, to: Writable) {
     return new Promise<void>((resolve, reject) => {
         let err: any;
-        const result = createWriteStream(fn);
         const done = () => {
-            if (result.writableFinished) {
-                resolve();
-            } else {
+            to.removeAllListeners();
+            if (!to.writableFinished) {
                 reject(err ?? new TypeError("Could not read download stream to the end."));
+            } else {
+                resolve();
             }
 
-            stream.destroy();
+            from.destroy();
         };
 
         const fail = async (ex: any) => {
-            stream.removeAllListeners();
-
-            if (!stream.readableEnded) {
+            from.removeAllListeners();
+            if (!from.readableEnded) {
                 err = ex;
-                result.destroy();
+                to.destroy();
             }
         };
 
-        result.on("error", done);
-        result.on("close", done);
-        stream.on("error", fail);
-        stream.on("close", fail);
+        to.on("error", done);
+        to.on("close", done);
+        from.on("error", fail);
+        from.on("close", fail);
+        from.pipe(to);
     });
 }
 
-async function stash(url: string | URL, cacheDir: string, extractDir: string, asName?: string) {
+async function store(fn: string, stream: Readable) {
+    const result = createWriteStream(fn);
+    return pipeAsync(stream, result);
+}
+
+async function stash(url: string | URL, cacheDir: string, files: Set<string>, asName?: string) {
     url = new URL(url);
-    await fs.mkdir(cacheDir, { recursive: true });
-    await fs.mkdir(extractDir, { recursive: true });
 
     if (asName === undefined) {
-        asName = url.pathname;
+        asName = path.basename(url.pathname);
     }
 
-    const fnPath = path.join(extractDir, asName);
-    if (await fs.exists(fnPath) !== "file") {
-        const fnSource = path.join(cacheDir, asName);
-        if (await fs.exists(fnSource) !== "file") {
-            const nop = () => {};
-            const ext = path.extname(asName);
-            const name = path.basename(asName, ext);
-            const ts = "." + crypto.randomUUID();
-            const fnTemp = path.resolve(cacheDir, `${name}${ts}${ext}`);
-            const stream = await get(url);
-            try {
-                await store(fnTemp, stream);
-                await fs.rename(fnTemp, fnSource).catch(nop);
-            } finally {
-                await fs.rm(fnTemp, { recursive: true  }).catch(nop);
-            }
+    asName = path.resolve(cacheDir, asName);
+    asName = asName.replace(/[\\/]\*$/, path.basename(url.pathname));
+
+    if (await fs.exists(asName) !== "file") {
+        const ext = path.extname(asName);
+        const name = path.join(path.dirname(asName), path.basename(asName, ext));
+        const ts = "." + crypto.randomUUID();
+        const fnTemp = path.resolve(cacheDir, `${name}${ts}${ext}`);
+        await mkdirParent(fnTemp);
+
+        const stream = await get(url);
+        try {
+            await store(fnTemp, stream);
+            await fs.rename(fnTemp, asName).catch(() => {});
+        } finally {
+            await clean(fnTemp);
         }
-
-        await fs.copyFile(fnSource, fnPath);
     }
+
+    files.add(path.relative(cacheDir, asName));
 }
 
 function openZipFile(fn: string){
@@ -178,7 +193,7 @@ function readZipEntry(zf: yauzl.ZipFile) {
     });
 }
 
-function openZIpFile(zf: yauzl.ZipFile, entry: yauzl.Entry) {
+function openZipEntry(zf: yauzl.ZipFile, entry: yauzl.Entry) {
     return new Promise<Readable>((resolve, reject) => {
         zf.openReadStream(entry, (err, stream) => {
             if (err) {
@@ -197,72 +212,152 @@ async function unzip(fn: string, dir: string) {
     const zf = await openZipFile(fn);
     while (entry = await readZipEntry(zf)) {
         if (entry.fileName.match(fx)) {
-            const stream = await openZIpFile(zf, entry);
-            await store(path.join(dir, entry.fileName), stream);
+            console.log("web-extract:", entry.fileName);
+
+            const fn = path.join(dir, entry.fileName)
+            await mkdirParent(fn);
+
+            const stream = await openZipEntry(zf, entry);
+            await store(fn, stream);
         }
     }
 }
 
-async function extractAll(extractDir: string, filter: GlobMatch) {
-    const files = await fs.find(extractDir, filter);
-    const extx = /\.(tar\.gz|tar\.xz|tgz|txz|zip)$/;
+function findBase(files: string[]) {
+    files.sort();
+    
+    const [head, ...rest] = files;
+    if (head === undefined) {
+        return ".";
+    }
+
+    const tail = rest.pop();
+    if (tail === undefined) {
+        return path.dirname(head);
+    }
+
+    const j = Math.min(head.length, tail.length);
+    for (let i = 0; i < j && head[i] === tail[i]; i++) {}
+
+    const prefix = head.substring(0, j);
+    const [base] = prefix.match(/^(.*[\\/])?/)!;
+    return base;
+}
+
+async function simplify(dir: string) {
+    const files = await fs.find(dir, "**/*");
+    const base = findBase(files);
+    if (base.length > 0) {
+        for (const file of files) {
+            const to = path.join(dir, file.substring(base.length));
+            const from = path.join(dir, file);
+            await mkdirParent(to);
+            await fs.rename(from, to);
+        }
+
+        const old = path.resolve(dir, base);
+        await clean(old);
+    }
+}
+
+async function extractAll(cacheDir: string, extractDir: string, files: Iterable<string>) {
+    let extract = false;
+    const tarx = /\.(tar\.|t)[gx]z$/i;
+    const zipx = /\.zip$/i;
+    for (const file of files) {
+        const fn = path.resolve(cacheDir, file);
+        if (tarx.test(fn)) {
+            const dir = path.resolve(extractDir, file.replace(tarx, ""));
+            if (await fs.exists(dir) !== "dir") {
+                const filter = (fn: string) => {
+                    console.log("web-extract:", fn);
+                    return true;
+                };
+
+                extract = true;
+                await mkdir(dir);
+                await tar.x({ file: fn, cwd: dir, filter });
+                await simplify(dir);
+            }
+        }
+
+        if (zipx.test(fn)) {
+            const dir = path.resolve(extractDir, file.replace(zipx, ""));
+            if (await fs.exists(dir) !== "dir") {
+                extract = true;
+                await mkdir(dir);
+                await unzip(fn, dir);
+                await simplify(dir);
+            }
+        }
+    }
+
+    if (extract) {
+        const fn = path.resolve(extractDir, ".sha256");
+        await clean(fn);
+    }
+}
+
+async function digest(fn: string, hmac: string) {
+    const digest = crypto.createHash(hmac);
+    const list: Buffer[] = [];
+    digest.on("data", x => list.push(x));
+
+    const stream = createReadStream(fn);
+    await pipeAsync(stream, digest);
+
+    const buf = Buffer.concat(list);
+    const hash = buf.toString("hex");
+    return `${hmac}:${hash}`;
+}
+
+function hashIt(value: string, hmac: string) {
+    const digest = crypto.createHash(hmac);
+    digest.update(value);
+    
+    const hash = digest.digest("hex");
+    return `${hmac}:${hash}`;
+}
+
+async function verifyAll(extractDir: string, hmac: string, hash: string) {
+    const fnHash = path.resolve(extractDir, ".sha256");
+    if (await fs.exists(fnHash) === "file") {
+        return true;
+    }
+
+    const list: string[] = [];
+    const files = await fs.find(extractDir, "**/*");
     for (const file of files) {
         const fn = path.join(extractDir, file);
-        const name = path.basename(fn).replace(extx, "");
-        const dir = path.join(path.dirname(fn), name);
-        await fs.mkdir(dir, { recursive: true });
+        const hash = await digest(fn, hmac);
+        list.push(hash);
 
-        if (fn.endsWith("z")) {
-            await tar.x({ file: fn, cwd: dir })
-        } else {
-            await unzip(fn, dir);
-        }
+        console.group("web-digest:", file);
+        console.log("hash =", hash);
+        console.groupEnd();
     }
-}
 
-function digest(fn: string, hmac: string) {
-    return new Promise<string>((resolve, reject) => {
-        const stream = createReadStream(fn);
-        const digest = crypto.createHash(hmac);
-        stream.pipe(digest);
-        stream.on("error", reject);
-        stream.on("close", () => digest.destroy());
+    const state = list.sort().join(", ");
+    const result = hashIt(state, hmac);
+    console.group("web-digest-check:", hash);
+    console.log("hash =", result);
+    console.groupEnd();
 
-        const list: Buffer[] = [];
-        digest.on("data", x => list.push(x));
-        digest.on("close", () => {
-            const buf = Buffer.concat(list);
-            resolve(buf.toString("hex"));
-        });
-    });
-}
-
-async function verifyOne(extractDir: string, fn: string, hmac: string) {
-    fn = path.join(extractDir, fn);
-
-    const ext = "." + hmac;
-    const hash = await digest(fn, hmac);
-    const current = await fs.readFile(fn + ext, "utf-8").catch(() => undefined);
-    if (current !== undefined) {
-        if (current !== hash) {
-            const name = path.basename(fn);
-            throw new TypeError(`${name} does not match hash.`);
-        }
-    } else {
-        await fs.writeFile(fn + ext, hash, "utf-8");
+    if (hash !== result) {
+        return false;
     }
-}
 
-async function verifyAll(extractDir: string, filter: GlobMatch, hmac: string) {
-    const files = await fs.find(extractDir, filter);
-    const promises = files.map(x => verifyOne(extractDir, x, hmac));
-    await Promise.all(promises);
+    await mkdirParent(fnHash);
+    await fs.writeFile(fnHash, result);
+
+    return true;
 }
 
 namespace web {
     export let cacheDir = ".cache";
     export let extractDir = ".extract";
     export let hmac = "sha256";
+    export let files = new Set<string>();
 
     function resolve() {
         cacheDir = path.resolve(process.cwd(), cacheDir);
@@ -277,7 +372,7 @@ namespace web {
             buildStart() {
                 job = job ?? enqueue(async () => {
                     resolve();
-                    await stash(url, cacheDir, extractDir, as);                    
+                    await stash(url, cacheDir, files, as);
                 });
             },
 
@@ -287,24 +382,15 @@ namespace web {
         };
     }
 
-    export function extract(...patterns: (GlobMatch | string | string[])[]): Plugin {
-        if (patterns.length < 1) {
-            patterns = [
-                "*.zip",
-                "*.tar.{g,x}z",
-                "*.t{g,x}z",
-            ];
-        }
-
+    export function extract(): Plugin {
         let job: Promise<void> | undefined;
-        const filter = fs.glob(...patterns);
         return {
             name: "interop-extract",
 
             async generateBundle() {
                 job = job ?? enqueue(async () => {
                     resolve();
-                    await extractAll(extractDir, filter);
+                    await extractAll(cacheDir, extractDir, files);
                 });
 
                 await job;
@@ -312,24 +398,18 @@ namespace web {
         };
     }
 
-    export function verify(...patterns: (GlobMatch | string | string[])[]) {
-        if (patterns.length < 1) {
-            patterns = [
-                "*.zip",
-                "*.tar.{g,x}z",
-                "*.t{g,x}z",
-            ];
-        }
-
+    export function verify(hash: string): Plugin {
         let job: Promise<void> | undefined;
-        const filter = fs.glob(...patterns);
         return {
             name: "interop-verify",
 
-            async generateBundle() {
+            async writeBundle() {
                 job = job ?? enqueue(async () => {
                     resolve();
-                    await verifyAll(extractDir, filter, hmac);
+                    
+                    if (!await verifyAll(extractDir, hmac, hash)) {
+                        this.error("Hash of extracted content does not match!");
+                    }
                 });
 
                 await job;

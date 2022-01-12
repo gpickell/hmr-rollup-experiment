@@ -24,13 +24,13 @@ export default defineConfig({
     plugins: [
         bundle(),
         bundle.hmr(src),
-        bundle.search("experiments/hmr-browser/src"),
+        bundle.search("experiments/hmr-emotion/src"),
         bundle.classify("browser-entry", (name, id) => {
             const list = [
                 "experiments!dist/boot",
                 "experiments!dist/boot/browser",
                 "experiments!dist/boot/hmr-connect-ws",
-                "experiments/hmr-browser/src/**/*.{css,sass,scss}",
+                "experiments/hmr-emotion/src/**/global.scss",
                 "setup",
                 id,
             ];
@@ -43,9 +43,9 @@ export default defineConfig({
         tools.bind(),
         tools.glob(),
 
-        html("experiments/hmr-browser/public"),
+        html("experiments/hmr-emotion/public"),
+        html.emotion("app", "experiments/**/*.scss"),
         html.image(),
-        html.scss(),
 
         compile.swc(),
         resolve.cjs(),
@@ -63,7 +63,8 @@ export default defineConfig({
         hoist.globals({ hintMask: src }),
 
         // optimize(),
-        optimize.htmlMinifier(),
+        // optimize.htmlMinifier(),
+        optimize.cssClean(),
     ],
     watch: {
         include: [

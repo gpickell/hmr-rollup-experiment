@@ -8,6 +8,7 @@ import os from "os";
 
 const cwd = path.normalize(process.cwd() + "/");
 const globx = /^(.*?)([^\\/]*\*.*)$/;
+const relx = /^\.\.?\//;
 const slashx = /[\\/]+/g;
 
 function slashify(fn: string) {
@@ -182,8 +183,8 @@ namespace tools {
             patterns = ["**/*"];
         }
 
-        root = root.replace(/^!/, "node_modules/");
-        root = path.resolve(process.cwd(), root);
+        root = root.replace(/!/, "/node_modules/");
+        root = path.resolve(path.join(process.cwd(), root));
 
         const filter = fs.glob(...patterns);
         return {
@@ -209,11 +210,11 @@ namespace tools {
             patterns = ["**/*"];
         }
 
-        root = root.replace(/^!/, "node_modules/");
-        root = path.resolve(process.cwd(), root);
+        root = root.replace(/!/, "/node_modules/");
+        root = path.resolve(path.join(process.cwd(), root));
 
         const copy = async (dest: string, base: string, fn: string) => {
-            const to = path.resolve(dest, fn.substring(base.length));
+            const to = path.join(dest, fn.substring(base.length));
             if (await fs.exists(to) !== "file") {
                 const dir = path.dirname(to);
                 await fs.mkdir(dir, { recursive: true });
@@ -287,6 +288,23 @@ namespace tools {
         };
     }
 
+    async function climb(dir: string, hint: string) {
+        dir = path.resolve(dir);
+
+        let last: any;
+        while (dir !== last) {
+            const dn = path.resolve(dir, "node_modules", hint);
+            if (await fs.exists(dn) === "dir") {
+                return dir;
+            }
+
+            last = dir;
+            dir = path.dirname(dir);
+        }
+
+        return undefined;
+    }
+
     export function glob(): Plugin {
         const ns = new NameSpace();
         return {
@@ -298,18 +316,34 @@ namespace tools {
     
             async resolveId(id, importer, opts) {
                 if (ns.contains(id)) {
-                    return ns.resolve(this, id, opts)
+                    return ns.resolve(this, id, opts);
                 }
 
                 if (id[0] === "\0" || importer?.[0] === "\0") {
                     return undefined;
                 }
-   
-                importer = importer ? path.dirname(importer) : cwd;
 
                 const match = id.match(globx);
                 if (match !== null) {
                     const [, hint, pattern] = match;
+                    if (importer !== undefined) {
+                        importer = path.dirname(importer);
+
+                        if (!id.match(relx)) {
+                            importer = await climb(importer, hint);
+
+                            if (importer === undefined) {
+                                return undefined;
+                            }
+                        }
+                    } else {
+                        if (id.match(relx)) {
+                            return undefined;
+                        }
+
+                        importer = cwd;
+                    }
+       
                     const dir = path.resolve(importer, hint);
                     const temp = path.join(dir, "__dummy__")
                     if (temp.startsWith(cwd)) {
@@ -384,39 +418,27 @@ namespace tools {
         };
     }
 
-    export function adhoc(state: Record<string, unknown>): Plugin {
-        const str = JSON.stringify(state);
-        const code = [
-            `export const __exports = { __esModule: true };\n`,
-            `Object.assign(__exports, ${str});\n`,
-        ];
-
-        for (const value of Object.values(state)) {
-            if (typeof value === "function") {
-                code.push(`Object.assign(__exports, { ${value.toString()} });\n`);
-            }
-        }
-
+    export function adhoc(name: string, state: Record<string, unknown>): Plugin {
+        const ns = new NameSpace();
+        ns.addAdhoc(name, state);
+        
         return {
             name: "interop-adhoc",
 
-            resolveId(id) {
+            resolveId(id, _, opts) {
+                if (ns.has(id)) {
+                    return ns.resolve(this, id, opts);
+                }
+
                 if (typeof state[id] === "function") {
-                    return { id, syntheticNamedExports: "__exports" };
+                    return ns.addResult(name, id);
                 }
 
                 return undefined;
             },
 
             load(id) {
-                if (typeof state[id] === "function") {
-                    const result = [...code];
-                    result.push(`__exports[${JSON.stringify(id)}]();\n`);
-
-                    return result.join("");
-                }
-
-                return undefined;
+                return ns.load(id);
             }
         };
     }

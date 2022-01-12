@@ -2,8 +2,12 @@
   "version": "1.0.0",
   "private": "true",
   "type": "module",
-  "dependencies": {
+  "devDependencies": {
+    "@emotion/css": "^11.7.1",
+    "@rollup/plugin-commonjs": "^21.0.1",
     "@rollup/plugin-inject": "^4.0.3",
+    "@rollup/plugin-node-resolve": "^13.0.6",
+    "@rollup/plugin-typescript": "^8.3.0",
     "@swc/core": "^1.2.108",
     "@types/express": "4.17.13",
     "@types/html-minifier": "^4.0.1",
@@ -18,22 +22,17 @@
     "express": "^4.17.1",
     "html-minifier": "^4.0.0",
     "minimatch": "^3.0.4",
+    "rollup": "^2.58.0",
+    "sass": "^1.43.3",
     "svgo": "^2.8.0",
     "tar": "^6.1.11",
     "terser": "^5.10.0",
+    "tslib": "^2.3.1",
+    "typescript": "^4.4.4",
     "ws": "^8.3.0",
     "yauzl": "^2.10.0"
   },
   "imports": {
     "#package": "./package.mjs"
-  },
-  "devDependencies": {
-    "@rollup/plugin-commonjs": "^21.0.1",
-    "@rollup/plugin-node-resolve": "^13.0.6",
-    "@rollup/plugin-typescript": "^8.3.0",
-    "rollup": "^2.58.0",
-    "sass": "^1.43.3",
-    "tslib": "^2.3.1",
-    "typescript": "^4.4.4"
   }
 }

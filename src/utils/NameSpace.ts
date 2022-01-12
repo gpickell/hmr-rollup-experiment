@@ -247,6 +247,63 @@ class GlobModule extends Module {
     }
 }
 
+class AdhocModule extends Module {
+    name: string;
+    state: Record<string, unknown>;
+
+    constructor(name: string, state: Record<string, unknown>) {
+        super();
+        this.name = name;
+        this.state = state;
+    }
+
+    resolve() {
+        return { id: this.name, syntheticNamedExports: "__exports" };
+    }
+
+    load() {
+        const str = JSON.stringify(this.state);
+        const code = [
+            `export const __exports = { __esModule: true };\n`,
+            `Object.assign(__exports, ${str});\n`,
+        ];
+
+        for (const value of Object.values(this.state)) {
+            if (typeof value === "function") {
+                code.push(`Object.assign(__exports, { ${value.toString()} });\n`);
+            }
+        }
+
+        return code.join("");
+    }
+}
+
+class ResultModule extends Module {
+    ref: string;
+    name: string;
+
+    constructor(ref: string, name: string) {
+        super();
+        this.ref = ref;
+        this.name = name;
+    }
+
+    resolve() {
+        return { id: this.name, syntheticNamedExports: "__exports" };
+    }
+
+    load() {
+        const code = [
+            `import * as __imports from ${JSON.stringify(this.ref)};\n`,
+            `export const __exports = { __esModule: true };\n`,
+            `const __results = await __imports[${JSON.stringify(this.name)}]();\n`,
+            `__results && Object.assign(__exports, __results);\n`,
+        ];
+
+        return code.join("");
+    }
+}
+
 class NameSpace extends Map<string, Module> {
     static readonly all = new Map<string, NameSpace>();
     
@@ -296,12 +353,17 @@ class NameSpace extends Map<string, Module> {
         return undefined;
     }
 
-    async load(id: string) {
+    async load(id: string, emit?: string) {
         const module = this.get(id);
         if (module !== undefined) {
             let { code } = module;
             if (code === undefined) {
                 code = module.code = await module.load();
+            }
+
+            if (emit) {
+                console.log("---", emit, id);
+                console.log(code);
             }
 
             return code;
@@ -324,7 +386,14 @@ class NameSpace extends Map<string, Module> {
         this.set(id, module);
         this.set(key, module);
 
-        return module.resolve() as ReturnType<T["resolve"]>;
+        const result = module.resolve();
+        if (typeof result === "string") {
+            this.set(result, module);
+        } else if (result && !result.external) {
+            this.set(result.id, module);
+        }
+
+        return result as ReturnType<T["resolve"]>;
     }
 
     addAlias(hint: string) {
@@ -340,7 +409,7 @@ class NameSpace extends Map<string, Module> {
     }
 
     addEntry(name: string, targets: string | string[], track: boolean) {
-        return this.register(["entry", nextId++], () => new EntryModule(this, name, targets, track));
+        return this.register(nextId++, () => new EntryModule(this, name, targets, track));
     }
 
     addGlob(dir: string, pattern: string) {
@@ -349,6 +418,14 @@ class NameSpace extends Map<string, Module> {
 
     addHot(ref: string) {
         return this.register(["hmr", ref], () => new HotModule(ref));
+    }
+
+    addAdhoc(name: string, state: Record<string, unknown>) {
+        return this.register(["adhoc", name], () => new AdhocModule(name, state));
+    }
+
+    addResult(ref: string, name: string) {
+        return this.register(["result", name], () => new ResultModule(ref, name));
     }
 }
 

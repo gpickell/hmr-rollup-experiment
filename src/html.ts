@@ -8,10 +8,12 @@ import sass from "sass";
 import fs, { GlobMatch } from "./utils/fs";
 import { FileOptimizers } from "./optimize";
 
+const cwd = path.normalize(process.cwd() + "/");
 const hmrIndex = resolve("./hmr/index");
 const commentx = /^(\s*)<!--\s*([^\s]+)\s*(.*?)\s*-->\s*$/;
 const crnlx = /\r?\n/;
 const scssx = /\.(sass|s?css)$/;
+const nmx = /[\\/]node_modules[\\/]/;
 const slashx = /[\\/]+/g;
 
 function loadStyle(hmr: HMR, data: string) {
@@ -33,6 +35,29 @@ function loadStyle(hmr: HMR, data: string) {
 
 namespace loadStyle {
     export const id = "\0loadStyle";
+
+    export function toCode() {
+        const code = [
+            loadStyle.toString(),
+            "\nexport default loadStyle;\n"
+        ];
+
+        return code.join("");
+    }
+
+    export function toStyle(text: string) {
+        const code = [
+            `import hmr from ${expand(hmrIndex)};\n`,
+            `import loadStyle from ${expand(loadStyle.id)};\n`,
+            `const css = ${expand(text)};\n`,
+            `export function __start() {\n`,
+            `    loadStyle(hmr, css);\n`,    
+            `}\n`,
+            `export default css;\n`,
+        ];
+
+        return code.join("");
+    }
 }
 
 function expand(...args: string[]) {
@@ -314,6 +339,99 @@ function html(templatePath: string, whichPath = "index.html", ...patterns: (Glob
 }
 
 namespace html {
+    export function emotion(prefix = "app", ...mask: (GlobMatch | string | string[])[]): Plugin {
+        if (mask.length < 1) {
+            mask = ["src/**/*.css"];
+        }
+
+        let optimizers: FileOptimizers;
+        const filter = fs.glob(...mask);
+        return {
+            name: "interop-html-emotion",
+
+            buildStart({ plugins }) {
+                optimizers = FileOptimizers.create(plugins);
+            },
+
+            async resolveId(id, importer) {
+                if (id === loadStyle.id) {
+                    return id;
+                }
+
+                if (importer === undefined) {
+                    return undefined;
+                }
+
+                if (importer[0] === "\0") {
+                    return undefined;
+                }
+
+                if (importer.match(nmx)) {
+                    return undefined;
+                }
+
+                if (id === "@emotion/css") {
+                    return { id: `\0${id}`, syntheticNamedExports: "__exports"  };
+                }
+
+                return undefined;
+            },
+
+            async load(id) {
+                if (id === loadStyle.id) {
+                    return loadStyle.toCode();
+                }
+
+                if (id === "\0@emotion/css") {
+                    const code = [
+                        `import createInstance from "@emotion/css/create-instance";\n`,
+                        `const key = ${JSON.stringify(prefix)};\n`,
+                        `export const __exports = createInstance({ key });\n`,
+                    ];
+
+                    return code.join("");
+                }
+
+                if (id[0] === "\0") {
+                    return undefined;
+                }
+
+                if (!id.startsWith(cwd)) {
+                    return undefined;
+                }
+
+                const rel = path.relative(cwd, id);
+                if (!filter(rel)) {
+                    return undefined;
+                }
+
+                const { cache, css, flush, injectGlobal } = await import("@emotion/css");
+                flush();
+
+                const source = await fs.readFile(id, "utf-8");
+                if (path.basename(id).startsWith("global.")) {
+                    injectGlobal(source);
+
+                    const values = Object.values(cache.inserted);
+                    const text = await optimizers.process(id, values.join("\n"), "source");
+                    return loadStyle.toStyle(text);
+                }
+
+                const name = "." + css(source);
+                const values = Object.values(cache.inserted);
+                const fixed = values.join("").split(name).join("&");
+                const text = await optimizers.process(id, fixed, "source");
+                const code = [
+                    `import { css } from "@emotion/css";\n`,
+                    `const className = css(${JSON.stringify(text)});\n`,
+                    `export default className;\n`,
+                ];
+
+                return code.join("");
+            }
+        };
+    }
+
     export function image(): Plugin {
         let optimizers: FileOptimizers;
         return {
@@ -329,6 +447,10 @@ namespace html {
                 }
 
                 const ext = path.extname(id) as keyof typeof mimeTypes;
+                if (ext === ".css") {
+                    return undefined;
+                }
+
                 const mimeType = mimeTypes[ext];
                 if (mimeType) {
                     const image = await fs.readFile(id);
@@ -366,12 +488,7 @@ namespace html {
 
             async load(id: string) {
                 if (id === loadStyle.id) {
-                    const code = [
-                        loadStyle.toString(),
-                        "\nexport default loadStyle;\n"
-                    ];
-
-                    return code.join("");
+                    return loadStyle.toCode();
                 }
 
                 if (id[0] === "\0") {
@@ -413,17 +530,7 @@ namespace html {
                 });
 
                 const text = await optimizers.process(id, css, "source");
-                const code = [
-                    `import hmr from ${expand(hmrIndex)};\n`,
-                    `import loadStyle from ${expand(loadStyle.id)};\n`,
-                    `const css = ${expand(text)};\n`,
-                    `export function __start() {\n`,
-                    `    loadStyle(hmr, css);\n`,    
-                    `}\n`,
-                    `export default css;\n`,
-                ];
-
-                return code.join("");
+                return loadStyle.toStyle(text);
             }
         };
     }
