@@ -1,6 +1,5 @@
-import type { Plugin } from "rollup";
-import inject from "@rollup/plugin-inject";
 import NameSpace from "./utils/NameSpace";
+import Plugin from "./Plugin"
 
 import fs, { GlobMatch } from "./utils/fs";
 import path from "path";
@@ -238,23 +237,6 @@ namespace tools {
         };
     }
 
-    export function observe(fn: () => any): Plugin {
-        let waiter: Promise<void> | undefined;
-        return () => {
-            return {
-                name: "interop-observe",
-    
-                async buildStart() {
-                    if (waiter === undefined) {
-                        waiter = (async () => { await fn() })();
-                    }
-    
-                    await waiter;
-                }
-            };
-        };
-    }
-
     async function mklink(src: string, dst: string) {
         const target = await fs.realpath(dst).catch(() => undefined);
         if (target !== src) {
@@ -361,86 +343,68 @@ namespace tools {
     }
 
     export function alias(modules: Record<string, string>): Plugin {
-        const ns = new NameSpace();
-        return {
-            name: "interop-alias",
-
-            resolveId(id, _, opts) {
-                if (ns.contains(id)) {
-                    return ns.resolve(this, id, opts)
+        const mapper = Plugin.mapper();
+        for (const [id, name] of Object.entries(modules)) {
+            mapper.add({ id }, Plugin, {
+                resolveId(_, importer, opts) {
+                    return this.resolve(name, importer, opts);
                 }
+            });
+        }
 
-                const target = modules[id];
-                if (target !== undefined) {                    
-                    const { id } = ns.addAlias(target);
-                    return ns.resolve(this, id, opts);
-                }
-
-                return undefined;
-            }
-        };
-    }
-
-    export function provide(modules: Record<string, string>): Plugin {
-        const prefix = NameSpace.alloc();
-        const globals = () => {
-            const result: Record<string, string> = {};
-            for (const [key, value] of Object.entries(modules)) {
-                result[key] = `${prefix}${value}`;
-            }
-
-            return result;
-        };
-
-        const ns = new NameSpace();
-        const { transform } = inject({ modules: globals() });
-        return {
-            name: "interop-provide",
-
-            resolveId(id, _, opts) {
-                if (ns.contains(id)) {
-                    return ns.resolve(this, id, opts)
-                }
-
-                const hint = id;
-                if (id.startsWith(prefix)) {
-                    const target = hint.substring(prefix.length);
-                    const { id } = ns.addAlias(target);
-                    return ns.resolve(this, id, opts);
-                }
-
-                return undefined;
-            },
-
-            transform(code, id) {
-                return transform?.call(this, code, id);
-            }
-        };
+        return Plugin.build({ name: "interop-alias" });
     }
 
     export function adhoc(name: string, state: Record<string, unknown>): Plugin {
-        const ns = new NameSpace();
-        ns.addAdhoc(name, state);
-        
-        return {
-            name: "interop-adhoc",
+        const hints = [] as any[];
+        for (const id in state) {
+            if (typeof state[id] === "function") {
+                hints.push({ id });
+            }
+        }
 
-            resolveId(id, _, opts) {
-                if (ns.has(id)) {
-                    return ns.resolve(this, id, opts);
+        const mapper = Plugin.mapper();
+        const syntheticNamedExports = "__exports";
+        mapper.add({ id: name }, Plugin, {
+            resolveId(id) {
+                return { id, syntheticNamedExports };
+            },
+
+            load() {
+                const str = JSON.stringify(state);
+                const code = [
+                    `export const __exports = { __esModule: true };\n`,
+                    `Object.assign(__exports, ${str});\n`,
+                ];
+
+                for (const value of Object.values(state)) {
+                    if (typeof value === "function") {
+                        code.push(`Object.assign(__exports, { ${value.toString()} });\n`);
+                    }
                 }
 
-                if (typeof state[id] === "function") {
-                    return ns.addResult(name, id);
-                }
+                return code.join("");
+            },
+        });
 
-                return undefined;
+        mapper.add(hints, Plugin, {
+            resolveId(id) {
+                return { id, syntheticNamedExports };
             },
 
             load(id) {
-                return ns.load(id);
-            }
-        };
+                const code = [
+                    `import * as __imports from ${JSON.stringify(name)};\n`,
+                    `export const __exports = { __esModule: true };\n`,
+                    `const __results = await __imports[${JSON.stringify(id)}]();\n`,
+                    `__results && Object.assign(__exports, __results);\n`,
+                ];
+
+                return code.join("");
+            },
+        });
+
+        return Plugin.build({ name: "interop-adhoc" });
     }
 }
 

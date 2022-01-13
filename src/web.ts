@@ -1,19 +1,23 @@
 import type { Plugin } from "rollup";
-import type { Readable, Writable } from "stream";
+import type { Duplex, Readable, Writable } from "stream";
 
-import fs from "./utils/fs";
+import fs, { GlobMatch } from "./utils/fs";
 import { createReadStream, createWriteStream } from "fs";
 import crypto from "crypto";
 import http from "http";
 import https from "https";
 import path from "path";
+import os from "os";
 import urlConvert from "./utils/url-convert";
 
+import { fifo, swallow } from "./utils/pipe";
 import tar from "tar";
 import yauzl from "yauzl";
 
 let running = false;
 const queue: ((next: () => void) => void)[] = [];
+const tarx = /\.(tar\.|t)[gx]z$/i;
+const zipx = /\.zip$/i;
 
 async function mkdir(fn: string) {
     await fs.mkdir(fn, { recursive: true });
@@ -50,7 +54,7 @@ function enqueue(fn: () => Promise<void>) {
     });
 }
 
-async function get(url: string | URL) {
+async function get(url: string | URL, rejectUnauthorized = true) {
     url = new URL(url);
     url.hash = "";
 
@@ -67,7 +71,7 @@ async function get(url: string | URL) {
     
     if (url.protocol === "https:") {
         return new Promise<Readable>((resolve, reject) => {
-            const req = https.get(url, { rejectUnauthorized: false });
+            const req = https.get(url, { rejectUnauthorized });
             req.on("error", reject);
             req.on("response", response => {
                 if (response.statusCode === 200) {
@@ -98,68 +102,107 @@ async function get(url: string | URL) {
     throw new Error(`Cannot fetch ${url}, protocol must be one of http, https, or file.`);
 }
 
-function pipeAsync(from: Readable, to: Writable) {
-    return new Promise<void>((resolve, reject) => {
-        let err: any;
-        const done = () => {
-            to.removeAllListeners();
-            if (!to.writableFinished) {
-                reject(err ?? new TypeError("Could not read download stream to the end."));
-            } else {
-                resolve();
-            }
-
-            from.destroy();
-        };
-
-        const fail = async (ex: any) => {
-            from.removeAllListeners();
-            if (!from.readableEnded) {
-                err = ex;
-                to.destroy();
-            }
-        };
-
-        to.on("error", done);
-        to.on("close", done);
-        from.on("error", fail);
-        from.on("close", fail);
-        from.pipe(to);
+function openFileWriter(fn: string) {
+    return new Promise<Writable>((resolve, reject) => {
+        const result = createWriteStream(fn);
+        result.on("open", () => resolve(result));
+        result.on("error", reject);
     });
 }
 
-async function store(fn: string, stream: Readable) {
-    const result = createWriteStream(fn);
-    return pipeAsync(stream, result);
+function fork(source: Readable, output: Writable, digest: Duplex) {
+    return new Promise<string>((resolve, reject) => {
+        const data = [] as Buffer[];
+        digest.on("data", x => data.push(x));
+
+        const finish = (err?: Error) => {
+            const text = Buffer.concat(data).toString("hex");
+            err ? reject(err) : resolve(text);
+        };
+
+        const [reader, writer] = fifo();
+        reader.pipe(output);
+        reader.pipe(digest);
+
+        source.on("error", finish);
+        output.on("error", finish);
+        digest.on("error", finish);
+
+        let count = 0;
+        source.on("close", () => {
+            if (!source.readableEnded) {
+                finish(new TypeError("Source stream did not end properly."));
+            }
+
+            ++count >= 3 && finish();
+        });
+
+        output.on("close", () => {
+            if (!output.writableFinished) {
+                finish(new TypeError("Output stream did not end properly."));
+            }
+
+            ++count >= 3 && finish();
+        });
+
+        digest.on("close", () => {
+            if (!digest.readableEnded) {
+                finish(new TypeError("Digest stream did not end properly."));
+            }
+
+            ++count >= 3 && finish();
+        });
+
+        source.pipe(writer);
+    });
 }
 
-async function stash(url: string | URL, cacheDir: string, files: Set<string>, asName?: string) {
-    url = new URL(url);
+async function stash(url: string | URL, fn: string, hmac: string, rejectUnauthorized = true) {
+    let fnTemp: string | undefined;
+    let source: Readable | undefined;
+    let digest: Duplex | undefined;
+    let output: Writable | undefined;
 
-    if (asName === undefined) {
-        asName = path.basename(url.pathname);
-    }
+    try {
+        url = new URL(url);
 
-    asName = path.resolve(cacheDir, asName);
-    asName = asName.replace(/[\\/]\*$/, path.basename(url.pathname));
-
-    if (await fs.exists(asName) !== "file") {
-        const ext = path.extname(asName);
-        const name = path.join(path.dirname(asName), path.basename(asName, ext));
-        const ts = "." + crypto.randomUUID();
-        const fnTemp = path.resolve(cacheDir, `${name}${ts}${ext}`);
-        await mkdirParent(fnTemp);
-
-        const stream = await get(url);
-        try {
-            await store(fnTemp, stream);
-            await fs.rename(fnTemp, asName).catch(() => {});
-        } finally {
-            await clean(fnTemp);
+        const fnHash = `${fn}.${hmac}`;
+        const fileHash = await fs.readFile(fnHash, "utf-8").catch(() => undefined);
+        if (fileHash) {
+            return fileHash;
         }
-    }
 
-    files.add(path.relative(cacheDir, asName));
+        const stat = await fs.lstat(fn).catch(() => undefined);
+        if (stat?.isFile()) {
+            source = createReadStream(fn);
+            output = swallow().resume();
+            digest = crypto.createHash(hmac);
+
+            const fileHash = await fork(source, output, digest);
+            await fs.writeFile(fnHash, fileHash);
+
+            return fileHash;
+        }
+
+        await mkdirParent(fn);
+
+        const uuid = crypto.randomUUID();
+        fnTemp = `${fn}.${uuid}`;
+        output = await openFileWriter(fnTemp);
+        source = await get(url, rejectUnauthorized);
+        digest = crypto.createHash(hmac);
+
+        const hash = await fork(source, output, digest);
+        await fs.rename(fnTemp, fn);
+        await fs.writeFile(fnHash, hash);
+
+        return hash;
+    } finally {
+        source?.destroy();
+        digest?.destroy();
+        output?.destroy();
+        fnTemp && await clean(fnTemp);
+    }
 }
 
 function openZipFile(fn: string){
@@ -217,8 +260,10 @@ async function unzip(fn: string, dir: string) {
             const fn = path.join(dir, entry.fileName)
             await mkdirParent(fn);
 
-            const stream = await openZipEntry(zf, entry);
-            await store(fn, stream);
+            const source = await openZipEntry(zf, entry);
+            const output = createWriteStream(fn);
+            const digest = swallow().resume();
+            await fork(source, output, digest);
         }
     }
 }
@@ -228,7 +273,7 @@ function findBase(files: string[]) {
     
     const [head, ...rest] = files;
     if (head === undefined) {
-        return ".";
+        return "";
     }
 
     const tail = rest.pop();
@@ -244,178 +289,91 @@ function findBase(files: string[]) {
     return base;
 }
 
-async function simplify(dir: string) {
-    const files = await fs.find(dir, "**/*");
+async function simplify(tmp: string, dir: string, filter: GlobMatch) {
+    const files = await fs.find(tmp, filter);
     const base = findBase(files);
-    if (base.length > 0) {
-        for (const file of files) {
-            const to = path.join(dir, file.substring(base.length));
-            const from = path.join(dir, file);
-            await mkdirParent(to);
-            await fs.rename(from, to);
-        }
-
-        const old = path.resolve(dir, base);
-        await clean(old);
-    }
+    const promises = files.map(async file => {
+        const to = path.join(dir, file.substring(base.length));
+        const from = path.join(tmp, file);
+        await mkdirParent(to);
+        await fs.rename(from, to);
+    });
+    
+    await Promise.all(promises);
 }
 
-async function extractAll(cacheDir: string, extractDir: string, files: Iterable<string>) {
-    let extract = false;
-    const tarx = /\.(tar\.|t)[gx]z$/i;
-    const zipx = /\.zip$/i;
-    for (const file of files) {
-        const fn = path.resolve(cacheDir, file);
-        if (tarx.test(fn)) {
-            const dir = path.resolve(extractDir, file.replace(tarx, ""));
-            if (await fs.exists(dir) !== "dir") {
-                const filter = (fn: string) => {
-                    console.log("web-extract:", fn);
-                    return true;
-                };
+async function extract(fn: string, dir: string, filter: GlobMatch) {
+    const tmp = path.resolve(dir, "..", crypto.randomUUID());
+    try {
+        await clean(dir);
+        await mkdir(tmp);
 
-                extract = true;
-                await mkdir(dir);
-                await tar.x({ file: fn, cwd: dir, filter });
-                await simplify(dir);
-            }
+        if (tarx.test(fn)) {
+            await tar.x({ file: fn, cwd: tmp });
         }
 
         if (zipx.test(fn)) {
-            const dir = path.resolve(extractDir, file.replace(zipx, ""));
-            if (await fs.exists(dir) !== "dir") {
-                extract = true;
-                await mkdir(dir);
-                await unzip(fn, dir);
-                await simplify(dir);
-            }
+            await unzip(fn, tmp);
         }
-    }
 
-    if (extract) {
-        const fn = path.resolve(extractDir, ".sha256");
-        await clean(fn);
+        await simplify(tmp, dir, filter);
+    } finally {
+        await clean(tmp);
     }
 }
 
-async function digest(fn: string, hmac: string) {
-    const digest = crypto.createHash(hmac);
-    const list: Buffer[] = [];
-    digest.on("data", x => list.push(x));
-
-    const stream = createReadStream(fn);
-    await pipeAsync(stream, digest);
-
-    const buf = Buffer.concat(list);
-    const hash = buf.toString("hex");
-    return `${hmac}:${hash}`;
+export interface Options {
+    url: string | URL;
+    as?: string;
+    dir?: string;
+    file?: string;
+    extract?: string[];
+    hash?: string;
 }
 
-function hashIt(value: string, hmac: string) {
-    const digest = crypto.createHash(hmac);
-    digest.update(value);
+function web(options: Options): Plugin {
+    const url = new URL(options.url);
+    const ext = path.extname(url.pathname);
+    const name = path.basename(url.pathname, ext);
+    const cacheDir = path.resolve(process.cwd(), web.cacheDir);
+    const fn = path.resolve(cacheDir, options.as ?? path.basename(url.pathname));
+    const dir = path.resolve(process.cwd(), options.dir ?? `.extract/${name}`);
+    const file = path.resolve(dir, options.file ?? path.basename(url.pathname));
+    const filter = options.extract ? fs.glob(options.extract) : undefined;
+    const hash = options.hash;
+    const fnHash = filter ? `${file}.sha256` : `${dir}/.sha256`;
+    return {
+        name: "interop-web",
+        async buildStart() {
+            await enqueue(async () => {
+                const fileHash = await fs.readFile(fnHash, "utf-8").catch(() => undefined);
+                if (!hash || fileHash !== hash) {
+                    const current = await stash(url, fn, web.hmac, !hash);
+                    console.log("hash-check: url =", url.toString());
+                    console.log("  source:", current);
+                    console.log("  wanted:", hash ?? "(not given)");
+
+                    if (hash && current !== hash) {
+                        throw new Error("Hash does not match!.");
+                    }
+
+                    if (filter) {
+                        await extract(fn, dir, filter);
+                    } else {
+                        await mkdirParent(file);
+                        await fs.copyFile(fn, file);
+                    }
     
-    const hash = digest.digest("hex");
-    return `${hmac}:${hash}`;
-}
-
-async function verifyAll(extractDir: string, hmac: string, hash: string) {
-    const fnHash = path.resolve(extractDir, ".sha256");
-    if (await fs.exists(fnHash) === "file") {
-        return true;
-    }
-
-    const list: string[] = [];
-    const files = await fs.find(extractDir, "**/*");
-    for (const file of files) {
-        const fn = path.join(extractDir, file);
-        const hash = await digest(fn, hmac);
-        list.push(hash);
-
-        console.group("web-digest:", file);
-        console.log("hash =", hash);
-        console.groupEnd();
-    }
-
-    const state = list.sort().join(", ");
-    const result = hashIt(state, hmac);
-    console.group("web-digest-check:", hash);
-    console.log("hash =", result);
-    console.groupEnd();
-
-    if (hash !== result) {
-        return false;
-    }
-
-    await mkdirParent(fnHash);
-    await fs.writeFile(fnHash, result);
-
-    return true;
+                    await fs.writeFile(fnHash, current);
+                }
+            });
+        }
+    };
 }
 
 namespace web {
-    export let cacheDir = ".cache";
-    export let extractDir = ".extract";
+    export let cacheDir = path.resolve(os.homedir()) ?? ".download-cache";
     export let hmac = "sha256";
-    export let files = new Set<string>();
-
-    function resolve() {
-        cacheDir = path.resolve(process.cwd(), cacheDir);
-        extractDir = path.resolve(process.cwd(), extractDir);
-    }
-
-    export function download(url: string, as?: string): Plugin {
-        let job: Promise<void> | undefined;
-        return {
-            name: "interop-download",
-
-            buildStart() {
-                job = job ?? enqueue(async () => {
-                    resolve();
-                    await stash(url, cacheDir, files, as);
-                });
-            },
-
-            async writeBundle() {
-                await job;
-            }
-        };
-    }
-
-    export function extract(): Plugin {
-        let job: Promise<void> | undefined;
-        return {
-            name: "interop-extract",
-
-            async generateBundle() {
-                job = job ?? enqueue(async () => {
-                    resolve();
-                    await extractAll(cacheDir, extractDir, files);
-                });
-
-                await job;
-            },
-        };
-    }
-
-    export function verify(hash: string): Plugin {
-        let job: Promise<void> | undefined;
-        return {
-            name: "interop-verify",
-
-            async writeBundle() {
-                job = job ?? enqueue(async () => {
-                    resolve();
-                    
-                    if (!await verifyAll(extractDir, hmac, hash)) {
-                        this.error("Hash of extracted content does not match!");
-                    }
-                });
-
-                await job;
-            },
-        };
-    }
 }
 
 export default web;

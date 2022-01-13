@@ -1,4 +1,4 @@
-import { Readable, Writable } from "stream";
+import { Readable, Writable, Duplex } from "stream";
 
 interface ErrorHandler {
     (err?: Error | null): any;
@@ -89,4 +89,27 @@ export function fifo(objectMode = false): [Readable, Writable] {
     };
 
     return [reader, writer];
+}
+
+export function swallow(objectMode = false) {
+    return new Duplex({
+        objectMode,
+        autoDestroy: true,
+
+        read() {
+            this.push(null);
+        },
+
+        write(_, __, cb) {
+            setImmediate(cb);
+        },
+
+        final(cb) {
+            setImmediate(cb);
+        },
+
+        destroy(err, cb) {
+            setImmediate(cb, err);
+        },
+    });
 }
