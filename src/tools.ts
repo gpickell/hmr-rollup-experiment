@@ -1,4 +1,3 @@
-import NameSpace from "./utils/NameSpace";
 import Plugin from "./Plugin"
 
 import fs, { GlobMatch } from "./utils/fs";
@@ -182,9 +181,6 @@ namespace tools {
             patterns = ["**/*"];
         }
 
-        root = root.replace(/!/, "/node_modules/");
-        root = path.resolve(path.join(process.cwd(), root));
-
         const filter = fs.glob(...patterns);
         return {
             name: "interop-copy",
@@ -208,9 +204,6 @@ namespace tools {
         if (patterns.length < 1) {
             patterns = ["**/*"];
         }
-
-        root = root.replace(/!/, "/node_modules/");
-        root = path.resolve(path.join(process.cwd(), root));
 
         const copy = async (dest: string, base: string, fn: string) => {
             const to = path.join(dest, fn.substring(base.length));
@@ -270,79 +263,112 @@ namespace tools {
         };
     }
 
-    async function climb(dir: string, hint: string) {
-        dir = path.resolve(dir);
+    export function root(prefix: string, dir: string)  {
+        return Plugin.build({
+            name: "interop-root",
 
-        let last: any;
-        while (dir !== last) {
-            const dn = path.resolve(dir, "node_modules", hint);
-            if (await fs.exists(dn) === "dir") {
-                return dir;
+            resolveId(id, _, opts) {
+                if (id.startsWith(prefix)) {
+                    id  = id.substring(prefix.length);
+                    
+                    const importer = path.resolve(cwd, dir, "__dummy__");
+                    return this.resolve(id, importer, opts);
+                }
+
+                return undefined;
             }
-
-            last = dir;
-            dir = path.dirname(dir);
-        }
-
-        return undefined;
+        });
     }
 
-    export function glob(): Plugin {
-        const ns = new NameSpace();
-        return {
+    export function glob(prefix = "src") {
+        const map = new Map<string, [string, string, string]>();
+        const ns = Plugin.ns("glob");
+        const mapper = Plugin.mapper();
+        mapper.add({ ns }, Plugin, {
+            resolveId(id) {
+                return { id };
+            },
+
+            async load(id) {
+                const tail = [
+                    "export async function __start() {\n",
+                    "    const list = Object.values(modules);\n",
+                    "    const promises = list.map(async x => (await x()).__start?.());\n",
+                    "    return Promise.all(promises);\n",
+                    "}\n",
+                ];
+
+                const [dir, pattern] = map.get(id)!;
+                const code = ["const modules = {"];
+                for (const fn of await fs.find(dir, pattern)) {
+                    if (code.length > 1) {
+                        code.push(",");
+                    }
+        
+                    const name = fn.replace(slashx, "/");
+                    const fp = path.resolve(dir, fn);
+                    code.push("\n    ");
+                    code.push(JSON.stringify(name));
+                    code.push(": () => import(");
+                    code.push(JSON.stringify(fp));
+                    code.push(")");
+                }
+        
+                if (code.length > 1) {
+                    code.push("\n");
+                }
+        
+                code.push("};\n");
+                code.push("export default modules;\n");
+                code.push("\n");
+                code.push(...tail);
+        
+                return code.join("");                
+            }
+        });
+        
+        return Plugin.build({
             name: "interop-glob",
 
             buildStart() {
-                ns.clear();
+                map.clear();
             },
-    
-            async resolveId(id, importer, opts) {
-                if (ns.contains(id)) {
-                    return ns.resolve(this, id, opts);
-                }
 
-                if (id[0] === "\0" || importer?.[0] === "\0") {
+            async resolveId(id, importer) {
+                if (id[0] === "\0") {
                     return undefined;
                 }
 
                 const match = id.match(globx);
                 if (match !== null) {
                     const [, hint, pattern] = match;
-                    if (importer !== undefined) {
-                        importer = path.dirname(importer);
-
-                        if (!id.match(relx)) {
-                            importer = await climb(importer, hint);
-
-                            if (importer === undefined) {
-                                return undefined;
-                            }
-                        }
+                    if (importer !== undefined && id.match(relx)) {
+                        importer = path.dirname(importer);          
+                    } else if (id.match(relx)) {
+                        return undefined;
                     } else {
-                        if (id.match(relx)) {
-                            return undefined;
-                        }
-
-                        importer = cwd;
+                        importer = path.resolve(cwd, prefix);
                     }
-       
+      
                     const dir = path.resolve(importer, hint);
-                    const temp = path.join(dir, "__dummy__")
+                    const temp = path.normalize(dir + "/");
                     if (temp.startsWith(cwd)) {
-                        return ns.addGlob(dir, pattern);
+                        const key = JSON.stringify([dir, pattern]);
+                        const entry = map.get(key) ?? [dir, pattern, Plugin.id(ns)];
+                        const [,, id] = entry;
+                        map.set(id, entry);
+                        map.set(key, entry);
+
+                        return { id };
                     }
                 }
     
                 return undefined;
-            },
-    
-            load(id) {
-                return ns.load(id);
             }
-        };
+        });
     }
 
-    export function alias(modules: Record<string, string>): Plugin {
+    export function alias(modules: Record<string, string>) {
         const mapper = Plugin.mapper();
         for (const [id, name] of Object.entries(modules)) {
             mapper.add({ id }, Plugin, {
@@ -355,11 +381,11 @@ namespace tools {
         return Plugin.build({ name: "interop-alias" });
     }
 
-    export function adhoc(name: string, state: Record<string, unknown>): Plugin {
+    export function adhoc(name: string, state: Record<string, unknown>) {
         const hints = [] as any[];
         for (const id in state) {
             if (typeof state[id] === "function") {
-                hints.push({ id });
+                hints.push({ id: `${name}/${id}` });
             }
         }
 
@@ -393,6 +419,8 @@ namespace tools {
             },
 
             load(id) {
+                id = id.substring(name.length + 1);
+                
                 const code = [
                     `import * as __imports from ${JSON.stringify(name)};\n`,
                     `export const __exports = { __esModule: true };\n`,

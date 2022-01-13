@@ -27,11 +27,11 @@ export default defineConfig({
         bundle.search("experiments/hmr-emotion/src"),
         bundle.classify("browser-entry", (name, id) => {
             const list = [
-                "experiments!dist/boot",
-                "experiments!dist/boot/browser",
-                "experiments!dist/boot/hmr-connect-ws",
-                "experiments/hmr-emotion/src/**/global.scss",
-                "setup",
+                "!dist/boot",
+                "!dist/boot/browser",
+                "!dist/boot/hmr-connect-ws",
+                "!./**/global.scss",
+                "adhoc/setup",
                 id,
             ];
 
@@ -41,6 +41,7 @@ export default defineConfig({
 
         tools.clean(),
         tools.bind(),
+        tools.root("!", "experiments/hmr-emotion/src"),
         tools.glob(),
 
         html("experiments/hmr-emotion/public"),

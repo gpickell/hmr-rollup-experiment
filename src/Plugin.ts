@@ -55,24 +55,24 @@ class Mapper extends Lookup {
             }
         }
     }
+}
 
-    id(ns: string) {
+class Plugin {
+    static id(ns: string) {
         return `${ns}${nextId++}`;
     }
 
-    ns(name: string) {
-        return `\0ns${nextId++}@${name}?`;
+    static ns(name: string) {
+        return `\0ns@${nextId++}@${name}?`;
     }
 
-    path(dir: string) {
+    static path(dir: string) {
         dir = path.resolve(dir);
         dir = path.normalize(dir + "/");
 
         return dir;
     }
-}
 
-class Plugin {
     static mapper() {
         return nextMapper ?? (nextMapper = new Mapper());
     }
@@ -128,7 +128,7 @@ class Plugin {
                         }
                     }
 
-                    if (id[0] === "\0" && id.indexOf("@ns") >= 0) {
+                    if (id.startsWith("\0ns@")) {
                         const ns = id.substring(0, id.indexOf("?") + 1);
                         for (const plugin of mapper.find({ ns }, Plugin)) {
                             const result = await plugin.resolveId?.call(this, id, importer, opts);    

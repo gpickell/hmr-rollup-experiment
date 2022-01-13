@@ -1,14 +1,9 @@
 import type { PluginContext, ResolveIdResult } from "rollup";
 import resolve from "./resolve";
 
-import fs from "../utils/fs";
-import path from "path";
-
 const hmrRuntime = resolve("./hmr/runtime");
 const hookIndex = resolve("./hook/index");
 
-const bangx = /^(.*?)!(.*)/;
-const slashx = /[\\/]+/;
 let nextId = 0;
 
 function expand(...values: any[]) {
@@ -104,50 +99,16 @@ class HotModule extends Module {
     }
 }
 
-class AliasModule extends Module {
-    hint: string;
-    importer?: string;
-
-    constructor(hint: string) {
-        super();
-
-        const match = hint.match(bangx);
-        if (match) {
-            [, this.importer, this.hint] = match;
-            this.importer = path.resolve(process.cwd(), this.importer, "__dummy__");
-        } else {
-            this.hint = hint;
-        }    
-    }
-
-    resolve() {
-        return { id: this.id };
-    }
-
-    route(): [string, string] | string {
-        const { hint, importer } = this;
-        return importer ? [hint, importer] : hint;
-    }
-}
-
 class EntryModule extends Module {
     hint: string;
     targets: string | string[];
     track: boolean;
 
-    constructor(ns: NameSpace, hint: string, targets: string | string[], track: boolean) {
+    constructor(hint: string, targets: string | string[], track: boolean) {
         super();
         this.hint = hint + ".json";
+        this.targets = targets;
         this.track = track;
-
-        if (Array.isArray(targets)) {
-            this.targets = targets.map(x => {
-                const { id } = ns.addAlias(x);
-                return id;
-            });
-        } else {
-            this.targets = targets;
-        }
     }
 
     resolve() {
@@ -189,115 +150,6 @@ class EntryModule extends Module {
             `import * as __module from ${expand(targets)};\n`,
             `const { default: __default } = __module;\n`,
             `export default __default;\n`
-        ];
-
-        return code.join("");
-    }
-}
-
-class GlobModule extends Module {
-    dir: string;
-    pattern: string;
-
-    constructor(dir: string, pattern: string) {
-        super();
-        this.dir = dir;
-        this.pattern = pattern;
-    }
-
-    resolve() {
-        return { id: this.id };
-    }
-
-    async load() {
-        const tail = [
-            "export async function __start() {\n",
-            "    const list = Object.values(modules);\n",
-            "    const promises = list.map(async x => (await x()).__start?.());\n",
-            "    return Promise.all(promises);\n",
-            "}\n",
-        ];
-        
-        const { dir, pattern } = this;
-        const code = ["const modules = {"];
-        for (const fn of await fs.find(dir, pattern)) {
-            if (code.length > 1) {
-                code.push(",");
-            }
-
-            const name = fn.replace(slashx, "/");
-            const fp = path.resolve(dir, fn);
-            code.push("\n    ");
-            code.push(JSON.stringify(name));
-            code.push(": () => import(");
-            code.push(JSON.stringify(fp));
-            code.push(")");
-        }
-
-        if (code.length > 1) {
-            code.push("\n");
-        }
-
-        code.push("};\n");
-        code.push("export default modules;\n");
-        code.push("\n");
-        code.push(...tail);
-
-        return code.join("");
-    }
-}
-
-class AdhocModule extends Module {
-    name: string;
-    state: Record<string, unknown>;
-
-    constructor(name: string, state: Record<string, unknown>) {
-        super();
-        this.name = name;
-        this.state = state;
-    }
-
-    resolve() {
-        return { id: this.name, syntheticNamedExports: "__exports" };
-    }
-
-    load() {
-        const str = JSON.stringify(this.state);
-        const code = [
-            `export const __exports = { __esModule: true };\n`,
-            `Object.assign(__exports, ${str});\n`,
-        ];
-
-        for (const value of Object.values(this.state)) {
-            if (typeof value === "function") {
-                code.push(`Object.assign(__exports, { ${value.toString()} });\n`);
-            }
-        }
-
-        return code.join("");
-    }
-}
-
-class ResultModule extends Module {
-    ref: string;
-    name: string;
-
-    constructor(ref: string, name: string) {
-        super();
-        this.ref = ref;
-        this.name = name;
-    }
-
-    resolve() {
-        return { id: this.name, syntheticNamedExports: "__exports" };
-    }
-
-    load() {
-        const code = [
-            `import * as __imports from ${JSON.stringify(this.ref)};\n`,
-            `export const __exports = { __esModule: true };\n`,
-            `const __results = await __imports[${JSON.stringify(this.name)}]();\n`,
-            `__results && Object.assign(__exports, __results);\n`,
         ];
 
         return code.join("");
@@ -396,10 +248,6 @@ class NameSpace extends Map<string, Module> {
         return result as ReturnType<T["resolve"]>;
     }
 
-    addAlias(hint: string) {
-        return this.register(["alias", hint], () => new AliasModule(hint));
-    }
-
     addExternal(id: string, hint: string) {
         return this.register(["external", id, hint], () => new ExternalModule(id, hint));
     }
@@ -409,23 +257,11 @@ class NameSpace extends Map<string, Module> {
     }
 
     addEntry(name: string, targets: string | string[], track: boolean) {
-        return this.register(nextId++, () => new EntryModule(this, name, targets, track));
-    }
-
-    addGlob(dir: string, pattern: string) {
-        return this.register(["glob", dir, pattern], () => new GlobModule(dir, pattern));
+        return this.register(nextId++, () => new EntryModule(name, targets, track));
     }
 
     addHot(ref: string) {
         return this.register(["hmr", ref], () => new HotModule(ref));
-    }
-
-    addAdhoc(name: string, state: Record<string, unknown>) {
-        return this.register(["adhoc", name], () => new AdhocModule(name, state));
-    }
-
-    addResult(ref: string, name: string) {
-        return this.register(["result", name], () => new ResultModule(ref, name));
     }
 }
 
