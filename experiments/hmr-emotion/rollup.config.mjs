@@ -17,31 +17,33 @@ const src = [
     "!**/node_modules/**",
 ];
 
+const base = "experiments/hmr-emotion/src";
+
 export default defineConfig({
     output: {
         dir: "experiments/dist",
     },
     plugins: [
         bundle(),
-        bundle.hmr(src),
-        bundle.search("experiments/hmr-emotion/src"),
+        bundle.hmr(base),
+        bundle.search(base),
         bundle.classify("browser-entry", (name, id) => {
-            const list = [
-                "!dist/boot",
-                "!dist/boot/browser",
-                "!dist/boot/hmr-connect-ws",
-                "!./**/global.scss",
-                "adhoc/setup",
-                id,
-            ];
-
-            name = "index";
-            return { [name]: list };
+            return {
+                name: "index",
+                imports: [
+                    "!dist/boot",
+                    "!dist/boot/browser",
+                    "!dist/boot/hmr-connect-ws",
+                    "!./**/global.scss",
+                    "adhoc/setup",
+                    id,    
+                ]
+            };
         }),
 
         tools.clean(),
         tools.bind(),
-        tools.root("!", "experiments/hmr-emotion/src"),
+        tools.root("!", base),
         tools.glob(),
 
         html("experiments/hmr-emotion/public"),
@@ -65,7 +67,7 @@ export default defineConfig({
 
         // optimize(),
         // optimize.htmlMinifier(),
-        optimize.cssClean(),
+        // optimize.cssClean(),
     ],
     watch: {
         include: [

@@ -15,7 +15,7 @@ function App() {
                     Learn React
                 </a>
                 <div className="edit">
-                    test edit asdf
+                    test edit test
                 </div>
             </header>
         </div>

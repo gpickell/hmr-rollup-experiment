@@ -1,7 +1,6 @@
 import type { PluginContext, ResolveIdResult } from "rollup";
 import resolve from "./resolve";
 
-const hmrRuntime = resolve("./hmr/runtime");
 const hookIndex = resolve("./hook/index");
 
 let nextId = 0;
@@ -70,86 +69,6 @@ class GlobalModule extends Module {
             `import { __global } from ${expand(hookIndex)};\n`,
             `const value = await __global(${expand(this.name, this.hint)});\n`,
             `export default value;\n`,
-        ];
-
-        return code.join("");
-    }
-}
-
-class HotModule extends Module {
-    ref: string;
-
-    constructor(ref: string) {
-        super();
-        this.ref = ref;
-    }
-
-    resolve() {
-        return { id: this.id };
-    }
-
-    load() {
-        const code = [
-            `import { create } from ${expand(hmrRuntime)};\n`,
-            `const hmr = create(${expand(this.ref)}, import.meta.ver);\n`,
-            `export default hmr;\n`,
-        ];
-
-        return code.join("");
-    }
-}
-
-class EntryModule extends Module {
-    hint: string;
-    targets: string | string[];
-    track: boolean;
-
-    constructor(hint: string, targets: string | string[], track: boolean) {
-        super();
-        this.hint = hint + ".json";
-        this.targets = targets;
-        this.track = track;
-    }
-
-    resolve() {
-        if (Array.isArray(this.targets)) {
-            return { id: this.id, syntheticNamedExports: "__exports" };
-        }
-
-        return { id: this.id };
-    }
-
-    load() {
-        const hmr = [
-            `import { track } from ${expand(hmrRuntime)};\n`,
-            `track(import.meta.url, ${expand(this.hint)});\n`,
-        ];
-
-        if (!this.track) {
-            hmr.length = 0;
-        }
-
-        const { targets } = this;
-        if (Array.isArray(targets)) {
-            const [ boot, ...rest ] = targets;
-            const imports = rest.map(x => `    () => import(${expand(x)}),\n`);
-            const code = [
-                ...hmr,
-                `import boot from ${expand(boot)};\n`,    
-                `export const __exports = await boot(\n`,
-                ...imports,
-                `);\n`
-            ];
-
-            return code.join("");
-        }
-
-        const code = [
-            ...hmr,
-            `export * from ${expand(targets)};\n`,
-            `import * as __module from ${expand(targets)};\n`,
-            `const { default: __default } = __module;\n`,
-            `export default __default;\n`
         ];
 
         return code.join("");
@@ -254,14 +173,6 @@ class NameSpace extends Map<string, Module> {
 
     addGlobal(name: string, hint: string) {
         return this.register(["global", name, hint], () => new GlobalModule(name, hint));
-    }
-
-    addEntry(name: string, targets: string | string[], track: boolean) {
-        return this.register(nextId++, () => new EntryModule(name, targets, track));
-    }
-
-    addHot(ref: string) {
-        return this.register(["hmr", ref], () => new HotModule(ref));
     }
 }
 

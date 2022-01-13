@@ -17,14 +17,16 @@ const src = [
     "!**/node_modules/**",
 ];
 
+const base = "experiments/hmr-browser/src";
+
 export default defineConfig({
     output: {
         dir: "experiments/dist",
     },
     plugins: [
         bundle(),
-        bundle.hmr(src),
-        bundle.search("experiments/hmr-browser/src"),
+        bundle.hmr(base),
+        bundle.search(base),
         bundle.classify("browser-entry", (name, id) => {
             const list = [
                 "!dist/boot",
@@ -41,7 +43,7 @@ export default defineConfig({
 
         tools.clean(),
         tools.bind(),
-        tools.root("!", "experiments/hmr-browser/src"),
+        tools.root("!", base),
         tools.glob(),
 
         html("experiments/hmr-browser/public"),
